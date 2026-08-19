@@ -1,0 +1,17 @@
+.DS_Store
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.pyc
+
+.env
+.env.*
+
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+
+/workspace/
