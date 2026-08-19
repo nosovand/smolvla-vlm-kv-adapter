@@ -1,0 +1,6 @@
+[project]
+name = "smolvla-vlm-expert-interface-experiments"
+version = "0.0.0"
+requires-python = ">=3.12"
+description = "A study of how frozen SmolVLM representations should be adapted when conditioning the action expert."
+dependencies = ["modal",]
