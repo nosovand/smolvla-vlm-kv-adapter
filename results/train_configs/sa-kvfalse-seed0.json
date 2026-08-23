@@ -1,0 +1,268 @@
+{
+  "accelerator": {
+    "activation_checkpointing": {
+      "mode": "none"
+    },
+    "compile": {
+      "backend": "inductor",
+      "enabled": false,
+      "mode": null,
+      "regional": true
+    },
+    "ddp": {
+      "find_unused_parameters": true,
+      "gradient_as_bucket_view": false,
+      "static_graph": false
+    },
+    "fsdp": {
+      "cpu_offload": false,
+      "ignored_modules": null,
+      "min_num_params": null,
+      "reshard_after_forward": true,
+      "wrap_modules": null
+    },
+    "gradient_accumulation": {
+      "steps": 1
+    },
+    "mixed_precision": "bf16"
+  },
+  "batch_size": 64,
+  "checkpoint_format": "safetensors",
+  "checkpoint_path": null,
+  "cudnn_deterministic": false,
+  "dataloader_multiprocessing_context": "spawn",
+  "dataset": {
+    "depth_output_unit": "mm",
+    "episodes": null,
+    "eval_split": 0.0,
+    "exclude_episodes": null,
+    "image_transforms": {
+      "enable": false,
+      "max_num_transforms": 3,
+      "random_order": false,
+      "tfs": {
+        "affine": {
+          "kwargs": {
+            "degrees": [
+              -5.0,
+              5.0
+            ],
+            "translate": [
+              0.05,
+              0.05
+            ]
+          },
+          "type": "RandomAffine",
+          "weight": 1.0
+        },
+        "brightness": {
+          "kwargs": {
+            "brightness": [
+              0.8,
+              1.2
+            ]
+          },
+          "type": "ColorJitter",
+          "weight": 1.0
+        },
+        "contrast": {
+          "kwargs": {
+            "contrast": [
+              0.8,
+              1.2
+            ]
+          },
+          "type": "ColorJitter",
+          "weight": 1.0
+        },
+        "hue": {
+          "kwargs": {
+            "hue": [
+              -0.05,
+              0.05
+            ]
+          },
+          "type": "ColorJitter",
+          "weight": 1.0
+        },
+        "saturation": {
+          "kwargs": {
+            "saturation": [
+              0.5,
+              1.5
+            ]
+          },
+          "type": "ColorJitter",
+          "weight": 1.0
+        },
+        "sharpness": {
+          "kwargs": {
+            "sharpness": [
+              0.5,
+              1.5
+            ]
+          },
+          "type": "SharpnessJitter",
+          "weight": 1.0
+        }
+      }
+    },
+    "repo_id": "lerobot/libero",
+    "repo_type": "dataset",
+    "return_uint8": false,
+    "revision": "a1aaacb7f6cd6ee5fb43120f673cebb0cfea7dd4",
+    "root": null,
+    "streaming": false,
+    "use_imagenet_stats": true,
+    "video_backend": "torchcodec"
+  },
+  "ema": {
+    "decay": null,
+    "enable": false,
+    "inv_gamma": 1.0,
+    "max_decay": 0.9999,
+    "min_decay": 0.0,
+    "power": 0.75,
+    "update_after_step": 0,
+    "use_for_eval": true
+  },
+  "env": null,
+  "env_eval_freq": 0,
+  "eval": {
+    "batch_size": 50,
+    "n_episodes": 50,
+    "recording": false,
+    "recording_private": false,
+    "recording_repo_id": null,
+    "use_async_envs": true
+  },
+  "eval_steps": 0,
+  "job": {
+    "detach": false,
+    "image": "huggingface/lerobot-gpu:latest",
+    "tags": [],
+    "target": null,
+    "timeout": "2d"
+  },
+  "job_name": "sa-kvfalse-seed0",
+  "log_freq": 200,
+  "max_eval_samples": 0,
+  "num_workers": 4,
+  "optimizer": {
+    "betas": [
+      0.9,
+      0.95
+    ],
+    "eps": 1e-08,
+    "grad_clip_norm": 10,
+    "lr": 0.0001,
+    "type": "adamw",
+    "weight_decay": 1e-10
+  },
+  "output_dir": "/mnt/storage/runs/sa-kvfalse-seed0",
+  "parallelism": {
+    "cfg_parallel": 1,
+    "context_parallel": {
+      "ring_degree": 1,
+      "ulysses_degree": 1
+    },
+    "dp_replicate": 1,
+    "dp_shard": 1
+  },
+  "peft": null,
+  "persistent_workers": true,
+  "policy": {
+    "adapt_to_pi_aloha": false,
+    "add_image_special_tokens": false,
+    "attention_mode": "self_attn",
+    "chunk_size": 50,
+    "compile_mode": "max-autotune",
+    "compile_model": false,
+    "device": "cuda",
+    "empty_cameras": 0,
+    "expert_width_multiplier": 0.75,
+    "freeze_vision_encoder": true,
+    "input_features": {},
+    "license": null,
+    "load_vlm_weights": true,
+    "max_action_dim": 32,
+    "max_period": 4.0,
+    "max_state_dim": 32,
+    "min_period": 0.004,
+    "n_action_steps": 1,
+    "n_obs_steps": 1,
+    "normalization_mapping": {
+      "ACTION": "MEAN_STD",
+      "STATE": "MEAN_STD",
+      "VISUAL": "IDENTITY"
+    },
+    "num_expert_layers": -1,
+    "num_steps": 10,
+    "num_vlm_layers": 16,
+    "optimizer_betas": [
+      0.9,
+      0.95
+    ],
+    "optimizer_eps": 1e-08,
+    "optimizer_grad_clip_norm": 10,
+    "optimizer_lr": 0.0001,
+    "optimizer_weight_decay": 1e-10,
+    "output_features": {},
+    "pad_language_to": "longest",
+    "prefix_length": -1,
+    "pretrained_path": null,
+    "pretrained_revision": null,
+    "private": null,
+    "push_to_hub": false,
+    "repo_id": null,
+    "resize_imgs_with_padding": [
+      512,
+      512
+    ],
+    "rtc_config": null,
+    "scheduler_decay_lr": 2.5e-06,
+    "scheduler_decay_steps": 100000,
+    "scheduler_warmup_steps": 100,
+    "self_attn_every_n_layers": -1,
+    "self_attn_kv_adapter": false,
+    "tags": null,
+    "tokenizer_max_length": 48,
+    "train_expert_only": true,
+    "train_state_proj": true,
+    "type": "smolvla",
+    "use_amp": false,
+    "use_cache": true,
+    "use_delta_joint_actions_aloha": false,
+    "use_peft": false,
+    "vlm_model_name": "HuggingFaceTB/SmolVLM2-500M-Video-Instruct"
+  },
+  "prefetch_factor": 4,
+  "rename_map": {},
+  "resume": false,
+  "reward_model": null,
+  "sample_weighting": null,
+  "save_checkpoint": true,
+  "save_checkpoint_to_hub": false,
+  "save_freq": 20000,
+  "scheduler": {
+    "decay_lr": 2.5e-06,
+    "num_decay_steps": 100000,
+    "num_warmup_steps": 100,
+    "peak_lr": 0.0001,
+    "type": "cosine_decay_with_warmup"
+  },
+  "seed": 0,
+  "steps": 100000,
+  "tolerance_s": 0.0001,
+  "use_policy_training_preset": true,
+  "wandb": {
+    "add_tags": true,
+    "disable_artifact": false,
+    "enable": false,
+    "entity": null,
+    "mode": null,
+    "notes": null,
+    "project": "lerobot",
+    "run_id": null
+  }
+}
