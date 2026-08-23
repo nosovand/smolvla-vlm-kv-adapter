@@ -1,0 +1,268 @@
+From 70402756ef5d8aedfed49557750a188a53b23db3 Mon Sep 17 00:00:00 2001
+From: Andrey Nosov <a.nosoff00@gmail.com>
+Date: Fri, 21 Aug 2026 15:40:32 +0200
+Subject: [PATCH 1/2] feat(smol_vla): kv adapter path for self_attn
+
+---
+ .../policies/smolvla/configuration_smolvla.py |   1 +
+ .../policies/smolvla/modeling_smolvla.py      |   1 +
+ .../policies/smolvla/smolvlm_with_expert.py   | 195 +++++++++++++++++-
+ 3 files changed, 186 insertions(+), 11 deletions(-)
+
+diff --git a/src/lerobot/policies/smolvla/configuration_smolvla.py b/src/lerobot/policies/smolvla/configuration_smolvla.py
+index 6d5288db..4a555407 100644
+--- a/src/lerobot/policies/smolvla/configuration_smolvla.py
++++ b/src/lerobot/policies/smolvla/configuration_smolvla.py
+@@ -64,6 +64,7 @@ class SmolVLAConfig(PreTrainedConfig):
+ 
+     # Attention utils
+     use_cache: bool = True
++    self_attn_kv_adapter: bool = False # Add K/V prefix adapter to self attention layers
+ 
+     # Finetuning settings
+     freeze_vision_encoder: bool = True
+diff --git a/src/lerobot/policies/smolvla/modeling_smolvla.py b/src/lerobot/policies/smolvla/modeling_smolvla.py
+index 2ac63b99..15e555f2 100644
+--- a/src/lerobot/policies/smolvla/modeling_smolvla.py
++++ b/src/lerobot/policies/smolvla/modeling_smolvla.py
+@@ -503,6 +503,7 @@ class VLAFlowMatching(nn.Module):
+             num_vlm_layers=self.config.num_vlm_layers,
+             self_attn_every_n_layers=self.config.self_attn_every_n_layers,
+             expert_width_multiplier=self.config.expert_width_multiplier,
++            self_attn_kv_adapter=self.config.self_attn_kv_adapter,
+             device=self.config.device if self.config.device is not None else "auto",
+         )
+         self.state_proj = nn.Linear(
+diff --git a/src/lerobot/policies/smolvla/smolvlm_with_expert.py b/src/lerobot/policies/smolvla/smolvlm_with_expert.py
+index 289dc43e..402e75af 100644
+--- a/src/lerobot/policies/smolvla/smolvlm_with_expert.py
++++ b/src/lerobot/policies/smolvla/smolvlm_with_expert.py
+@@ -83,6 +83,7 @@ class SmolVLMWithExpertModel(nn.Module):
+         num_vlm_layers: int = -1,
+         self_attn_every_n_layers: int = -1,
+         expert_width_multiplier: float = 0.5,
++        self_attn_kv_adapter: bool = False,
+         device: str = "auto",
+     ):
+         super().__init__()
+@@ -143,9 +144,46 @@ class SmolVLMWithExpertModel(nn.Module):
+         self.freeze_vision_encoder = freeze_vision_encoder
+         self.train_expert_only = train_expert_only
+         self.attention_mode = attention_mode
++        self.self_attn_kv_adapter = self_attn_kv_adapter
+         self.expert_hidden_size = lm_expert_config.hidden_size
+         self.set_requires_grad()
+ 
++        if self_attn_kv_adapter:
++
++            self.self_attn_kv_proj = nn.ModuleDict()
++
++            multiple_of = self.num_vlm_layers // self.num_expert_layers
++
++            for layer_idx in range(self.num_vlm_layers):
++                if multiple_of > 0 and layer_idx > 0 and layer_idx % multiple_of != 0:
++                    continue
++                
++                if not self.is_self_attn_layer(layer_idx):
++                    continue
++                self.self_attn_kv_proj[str(layer_idx)] = nn.ModuleDict(
++                    {
++                        "k_proj" : nn.Linear(
++                            config.text_config.num_key_value_heads * config.text_config.head_dim,
++                            lm_expert_config.num_key_value_heads * lm_expert_config.head_dim,
++                            bias=lm_expert_config.attention_bias,
++                        ),
++                        "v_proj": nn.Linear(
++                            config.text_config.num_key_value_heads * config.text_config.head_dim,
++                            lm_expert_config.num_key_value_heads * lm_expert_config.head_dim,
++                            bias=lm_expert_config.attention_bias,
++                        ),
++                    }
++                )
++
++    def is_self_attn_layer(self, layer_idx: int) -> bool:
++        if "cross" not in self.attention_mode:
++            return True
++
++        return (
++            self.self_attn_every_n_layers > 0
++            and layer_idx % self.self_attn_every_n_layers == 0
++        )
++
+     def get_vlm_model(self):
+         return self.vlm.model
+ 
+@@ -287,6 +325,128 @@ class SmolVLMWithExpertModel(nn.Module):
+         )
+         return [att_output], past_key_values
+ 
++    def forward_attn_layer_with_kv_proj(
++        self,
++        model_layers,
++        inputs_embeds,
++        layer_idx,
++        position_ids,
++        attention_mask,
++        batch_size,
++        head_dim,
++        use_cache: bool = True,
++        past_key_values: "DynamicCache | None" = None,
++    ) -> "tuple[list[torch.Tensor], DynamicCache | None]":
++        att_outputs = []
++
++        assert len(inputs_embeds) == 2 or (use_cache and past_key_values is not None), (
++            f"Both len(inputs_embeds) == {len(inputs_embeds)} and past_key_values is {past_key_values}"
++        )
++
++        attention_interface = self.get_attention_interface()
++
++        # We separate self attention into two blocks, since they stop sharing the same K/V prefix states
++
++        if inputs_embeds[0] is not None:
++            # Prefix attention
++            hidden_states = inputs_embeds[0]
++
++            layer = model_layers[0][layer_idx]
++
++            hidden_states = layer.input_layernorm(hidden_states)
++
++            input_shape = hidden_states.shape[:-1]
++            hidden_shape = (*input_shape, -1, layer.self_attn.head_dim)
++
++            hidden_states = hidden_states.to(dtype=layer.self_attn.q_proj.weight.dtype)
++            prefix_query_state = layer.self_attn.q_proj(hidden_states).view(hidden_shape)
++            prefix_key_state = layer.self_attn.k_proj(hidden_states).view(hidden_shape)
++            prefix_value_state = layer.self_attn.v_proj(hidden_states).view(hidden_shape)
++
++            P_len = prefix_query_state.shape[1]
++
++            vlm_position_ids = position_ids[:, :P_len]
++            vlm_mask = attention_mask[:, :P_len, :P_len]
++
++            prefix_query_state = apply_rope(prefix_query_state, vlm_position_ids)
++            prefix_key_state = apply_rope(prefix_key_state, vlm_position_ids)
++
++            if use_cache:
++                past_key_values.update(
++                    prefix_key_state.transpose(1, 2), prefix_value_state.transpose(1, 2), layer_idx
++                )
++
++            att_output = attention_interface(
++                        vlm_mask, batch_size, head_dim, prefix_query_state, prefix_key_state, prefix_value_state
++                    )
++
++            att_outputs.append(att_output)
++
++        elif use_cache and past_key_values is not None:
++            prefix_key_state = past_key_values.layers[layer_idx].keys.transpose(1, 2)
++            prefix_value_state = past_key_values.layers[layer_idx].values.transpose(1, 2)
++
++        if inputs_embeds[1] is not None:
++            hidden_states = inputs_embeds[1]
++            
++            layer = model_layers[1][layer_idx]
++
++            if layer is not None:
++
++                hidden_states = layer.input_layernorm(hidden_states)
++
++                input_shape = hidden_states.shape[:-1]
++                hidden_shape = (*input_shape, -1, layer.self_attn.head_dim)
++
++                hidden_states = hidden_states.to(dtype=layer.self_attn.q_proj.weight.dtype)
++
++                k_adapter = self.self_attn_kv_proj[str(layer_idx)]["k_proj"]
++                v_adapter = self.self_attn_kv_proj[str(layer_idx)]["v_proj"]
++
++                _prefix_key_state = prefix_key_state.to(dtype=k_adapter.weight.dtype).reshape(*prefix_key_state.shape[:2], -1)
++
++                adapted_prefix_key_state = k_adapter(_prefix_key_state).reshape(*prefix_key_state.shape[:2], -1, layer.self_attn.head_dim)
++
++                _prefix_value_state = prefix_value_state.to(dtype=v_adapter.weight.dtype).reshape(*prefix_value_state.shape[:2], -1)
++                
++                adapted_prefix_value_state = v_adapter(_prefix_value_state).reshape(*prefix_value_state.shape[:2], -1, layer.self_attn.head_dim)
++
++                expert_queries = layer.self_attn.q_proj(hidden_states).view(hidden_shape)
++                expert_keys = layer.self_attn.k_proj(hidden_states).view(hidden_shape)
++                expert_values = layer.self_attn.v_proj(hidden_states).view(hidden_shape)
++
++                S_len = expert_queries.shape[1]
++
++                # expert_query_position_id = (
++                #     position_ids[:, -S_len:] - torch.min(position_ids[:, -S_len:], dim=1, keepdim=True).values
++                # )  # start from 0
++
++                expert_query_position_id = position_ids[:, -S_len:]
++
++                _expert_keys = apply_rope(expert_keys, expert_query_position_id)
++
++                key_states = torch.cat([adapted_prefix_key_state, _expert_keys], dim=1)
++                values_states = torch.cat([adapted_prefix_value_state, expert_values], dim=1)
++                query_states = apply_rope(expert_queries, expert_query_position_id)
++
++                attn_mask = attention_mask[:, -S_len:, :key_states.shape[1]]
++
++                att_output = attention_interface(
++                    attn_mask,
++                    batch_size,
++                    head_dim,
++                    query_states,
++                    key_states,
++                    values_states,
++                )
++                att_outputs.append(att_output)
++
++            else:
++                att_outputs.append(None)
++
++        return att_outputs, past_key_values
++ 
++
+     def forward_cross_attn_layer(
+         self,
+         model_layers,
+@@ -441,17 +601,30 @@ class SmolVLMWithExpertModel(nn.Module):
+                 or "cross" not in self.attention_mode
+                 or (self.self_attn_every_n_layers > 0 and layer_idx % self.self_attn_every_n_layers == 0)
+             ):
+-                att_outputs, past_key_values = self.forward_attn_layer(
+-                    model_layers,
+-                    inputs_embeds,
+-                    layer_idx,
+-                    position_ids,
+-                    attention_mask,
+-                    batch_size,
+-                    head_dim,
+-                    use_cache=use_cache,
+-                    past_key_values=past_key_values,
+-                )
++                if self.self_attn_kv_adapter:
++                    att_outputs, past_key_values = self.forward_attn_layer_with_kv_proj(
++                        model_layers,
++                        inputs_embeds,
++                        layer_idx,
++                        position_ids,
++                        attention_mask,
++                        batch_size,
++                        head_dim,
++                        use_cache=use_cache,
++                        past_key_values=past_key_values,
++                    )
++                else:
++                    att_outputs, past_key_values = self.forward_attn_layer(
++                        model_layers,
++                        inputs_embeds,
++                        layer_idx,
++                        position_ids,
++                        attention_mask,
++                        batch_size,
++                        head_dim,
++                        use_cache=use_cache,
++                        past_key_values=past_key_values,
++                    )
+             else:
+                 att_outputs, past_key_values = self.forward_cross_attn_layer(
+                     model_layers,
+-- 
+2.39.3 (Apple Git-145)
+

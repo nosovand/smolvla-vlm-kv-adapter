@@ -1,0 +1,147 @@
+From 06c2f6a8932105c9506bf10a24f64616cf1fa09a Mon Sep 17 00:00:00 2001
+From: Andrey Nosov <a.nosoff00@gmail.com>
+Date: Sat, 22 Aug 2026 14:13:35 +0200
+Subject: [PATCH 2/2] test(smol_vla): parity test for kv adapter
+
+---
+ .../smolvla/test_self_attn_kv_adapter.py      | 128 ++++++++++++++++++
+ 1 file changed, 128 insertions(+)
+ create mode 100644 tests/policies/smolvla/test_self_attn_kv_adapter.py
+
+diff --git a/tests/policies/smolvla/test_self_attn_kv_adapter.py b/tests/policies/smolvla/test_self_attn_kv_adapter.py
+new file mode 100644
+index 00000000..c90bcd7e
+--- /dev/null
++++ b/tests/policies/smolvla/test_self_attn_kv_adapter.py
+@@ -0,0 +1,128 @@
++import copy
++
++import torch
++from torch import nn
++
++from lerobot.configs.default import DatasetConfig
++from lerobot.configs.train import TrainPipelineConfig
++from lerobot.datasets.factory import make_train_eval_datasets
++from lerobot.policies.factory import make_policy, make_pre_post_processors
++from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
++from lerobot.scripts.lerobot_train import _preprocess_dataset_batch
++from lerobot.utils.collate import lerobot_collate_fn
++from lerobot.utils.random_utils import set_seed
++from tests.utils import require_cuda, skip_if_package_missing
++
++
++@skip_if_package_missing("transformers")
++@require_cuda
++def test_self_attn_kv_adapter_forward_parity_and_grad():
++
++    set_seed(42)
++
++    dataset_config = DatasetConfig(
++        repo_id="lerobot/libero",
++        episodes=[0],
++    )
++
++    policy_config = SmolVLAConfig(
++        device="cuda",
++        load_vlm_weights=True,
++        train_expert_only=True,
++        attention_mode="cross_attn",
++        self_attn_kv_adapter=False,
++    )
++
++    base_policy_config = copy.deepcopy(policy_config)
++    new_policy_config = copy.deepcopy(policy_config)
++    new_policy_config.self_attn_kv_adapter = True
++
++    train_config = TrainPipelineConfig(
++        dataset=dataset_config,
++        policy=base_policy_config,
++    )
++
++    dataset, _ = make_train_eval_datasets(train_config)
++
++    base_policy = make_policy(base_policy_config, ds_meta=dataset.meta)
++    new_policy = make_policy(new_policy_config, ds_meta=dataset.meta)
++
++    result = new_policy.load_state_dict(
++        base_policy.state_dict(),
++        strict=False,
++    )
++
++    assert result.unexpected_keys == []
++    assert all("self_attn_kv_proj" in key for key in result.missing_keys)
++
++    adapters = new_policy.model.vlm_with_expert.self_attn_kv_proj
++    assert adapters, "No self-attention K/V adapters were created"
++
++    with torch.no_grad():
++        for layer in adapters.values():
++            for name in ("k_proj", "v_proj"):
++                projection = layer[name]
++                assert projection.in_features == projection.out_features
++                nn.init.eye_(projection.weight)
++                if projection.bias is not None:
++                    projection.bias.zero_()
++
++    preprocessor, _ = make_pre_post_processors(
++        policy_cfg=base_policy_config,
++        dataset_stats=dataset.meta.stats,
++    )
++
++    raw_batch = lerobot_collate_fn([dataset[0]])
++
++    batch = _preprocess_dataset_batch(
++        batch=raw_batch,
++        camera_keys=dataset.meta.camera_keys,
++        rename_map=train_config.rename_map,
++        preprocessor=preprocessor
++    )
++
++    base_policy.eval()
++    new_policy.eval()
++
++    padded_actions = base_policy.prepare_action(batch)
++    noise = base_policy.model.sample_noise(
++        padded_actions.shape,
++        padded_actions.device,
++    )
++
++    time = base_policy.model.sample_time(
++        padded_actions.shape[0],
++        padded_actions.device,
++    )
++
++    with torch.no_grad():
++        base_loss, _ = base_policy(batch, noise, time)
++        new_loss, _ = new_policy(batch, noise, time)
++
++    torch.testing.assert_close(
++        base_loss,
++        new_loss,
++        rtol=1e-3,
++        atol=1e-4,
++    )
++
++    new_policy.zero_grad(set_to_none=True)
++
++    new_loss, _ = new_policy(
++        batch,
++        noise=noise,
++        time=time,
++    )
++
++    new_loss.backward()
++
++    for layer in adapters.values():
++        for name in ("k_proj", "v_proj"):
++            grad = layer[name].weight.grad
++
++            assert grad is not None
++            assert torch.isfinite(grad).all()
++            assert grad.abs().sum().item() > 0
++
++
++
+-- 
+2.39.3 (Apple Git-145)
+
