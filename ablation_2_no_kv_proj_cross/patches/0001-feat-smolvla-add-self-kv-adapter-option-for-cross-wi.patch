@@ -1,0 +1,118 @@
+From bf218a9e3dc779a9acd7c1cdc4c9c14f4fc2824d Mon Sep 17 00:00:00 2001
+From: Researcher <researcher@example.com>
+Date: Wed, 26 Aug 2026 13:52:01 +0200
+Subject: [PATCH] feat(smolvla): add self kv adapter, option for cross without
+ kv proj
+
+---
+ .../policies/smolvla/configuration_smolvla.py |  1 +
+ .../policies/smolvla/modeling_smolvla.py      |  1 +
+ .../policies/smolvla/smolvlm_with_expert.py   | 33 +++++++++++--------
+ src/lerobot/scripts/lerobot_eval.py           |  8 +++--
+ 4 files changed, 28 insertions(+), 15 deletions(-)
+
+diff --git a/src/lerobot/policies/smolvla/configuration_smolvla.py b/src/lerobot/policies/smolvla/configuration_smolvla.py
+index 4a555407..20dc55bb 100644
+--- a/src/lerobot/policies/smolvla/configuration_smolvla.py
++++ b/src/lerobot/policies/smolvla/configuration_smolvla.py
+@@ -65,6 +65,7 @@ class SmolVLAConfig(PreTrainedConfig):
+     # Attention utils
+     use_cache: bool = True
+     self_attn_kv_adapter: bool = False # Add K/V prefix adapter to self attention layers
++    cross_attn_kv_projection: bool = True # Can remove prefix K/V projection from cross attention
+ 
+     # Finetuning settings
+     freeze_vision_encoder: bool = True
+diff --git a/src/lerobot/policies/smolvla/modeling_smolvla.py b/src/lerobot/policies/smolvla/modeling_smolvla.py
+index 15e555f2..8176665b 100644
+--- a/src/lerobot/policies/smolvla/modeling_smolvla.py
++++ b/src/lerobot/policies/smolvla/modeling_smolvla.py
+@@ -504,6 +504,7 @@ class VLAFlowMatching(nn.Module):
+             self_attn_every_n_layers=self.config.self_attn_every_n_layers,
+             expert_width_multiplier=self.config.expert_width_multiplier,
+             self_attn_kv_adapter=self.config.self_attn_kv_adapter,
++            cross_attn_kv_projection = self.config.cross_attn_kv_projection,
+             device=self.config.device if self.config.device is not None else "auto",
+         )
+         self.state_proj = nn.Linear(
+diff --git a/src/lerobot/policies/smolvla/smolvlm_with_expert.py b/src/lerobot/policies/smolvla/smolvlm_with_expert.py
+index 402e75af..34202b00 100644
+--- a/src/lerobot/policies/smolvla/smolvlm_with_expert.py
++++ b/src/lerobot/policies/smolvla/smolvlm_with_expert.py
+@@ -84,6 +84,7 @@ class SmolVLMWithExpertModel(nn.Module):
+         self_attn_every_n_layers: int = -1,
+         expert_width_multiplier: float = 0.5,
+         self_attn_kv_adapter: bool = False,
++        cross_attn_kv_projection = True,
+         device: str = "auto",
+     ):
+         super().__init__()
+@@ -145,6 +146,7 @@ class SmolVLMWithExpertModel(nn.Module):
+         self.train_expert_only = train_expert_only
+         self.attention_mode = attention_mode
+         self.self_attn_kv_adapter = self_attn_kv_adapter
++        self.cross_attn_kv_projection = cross_attn_kv_projection
+         self.expert_hidden_size = lm_expert_config.hidden_size
+         self.set_requires_grad()
+ 
+@@ -514,20 +516,25 @@ class SmolVLMWithExpertModel(nn.Module):
+             expert_hidden_states = expert_hidden_states.to(dtype=expert_layer.self_attn.q_proj.weight.dtype)
+             expert_query_state = expert_layer.self_attn.q_proj(expert_hidden_states).view(expert_hidden_shape)
+ 
+-            # reshape (not view): K/V read back from the cache are transposed, hence non-contiguous
+-            _key_states = key_states.to(dtype=expert_layer.self_attn.k_proj.weight.dtype).reshape(
+-                *key_states.shape[:2], -1
+-            )
+-            expert_key_states = expert_layer.self_attn.k_proj(_key_states).view(
+-                *_key_states.shape[:-1], -1, expert_layer.self_attn.head_dim
+-            )  # k_proj should have same dim as kv
++            if self.cross_attn_kv_projection:
++                # reshape (not view): K/V read back from the cache are transposed, hence non-contiguous
++                _key_states = key_states.to(dtype=expert_layer.self_attn.k_proj.weight.dtype).reshape(
++                    *key_states.shape[:2], -1
++                )
++                expert_key_states = expert_layer.self_attn.k_proj(_key_states).view(
++                    *_key_states.shape[:-1], -1, expert_layer.self_attn.head_dim
++                )  # k_proj should have same dim as kv
+ 
+-            _value_states = value_states.to(dtype=expert_layer.self_attn.v_proj.weight.dtype).reshape(
+-                *value_states.shape[:2], -1
+-            )
+-            expert_value_states = expert_layer.self_attn.v_proj(_value_states).view(
+-                *_value_states.shape[:-1], -1, expert_layer.self_attn.head_dim
+-            )
++                _value_states = value_states.to(dtype=expert_layer.self_attn.v_proj.weight.dtype).reshape(
++                    *value_states.shape[:2], -1
++                )
++                expert_value_states = expert_layer.self_attn.v_proj(_value_states).view(
++                    *_value_states.shape[:-1], -1, expert_layer.self_attn.head_dim
++                )
++            else:
++                # No extra projection
++                expert_key_states = key_states
++                expert_value_states = value_states
+ 
+             expert_position_id = (
+                 expert_position_id - torch.min(expert_position_id, dim=1, keepdim=True).values
+diff --git a/src/lerobot/scripts/lerobot_eval.py b/src/lerobot/scripts/lerobot_eval.py
+index 7629d62e..8d2d6db8 100644
+--- a/src/lerobot/scripts/lerobot_eval.py
++++ b/src/lerobot/scripts/lerobot_eval.py
+@@ -782,9 +782,13 @@ def eval_main(cfg: EvalPipelineConfig):
+     # Create environment-specific preprocessor and postprocessor (e.g., for LIBERO environments)
+     env_preprocessor, env_postprocessor = make_env_pre_post_processors(env_cfg=cfg.env, policy_cfg=cfg.policy)
+ 
++    # recording_dir = Path(cfg.output_dir) / "recordings" if cfg.eval.recording else None
++    # max_episodes_rendered = 0 if cfg.eval.recording else 10
++    # videos_dir = None if cfg.eval.recording else Path(cfg.output_dir) / "videos"
++
+     recording_dir = Path(cfg.output_dir) / "recordings" if cfg.eval.recording else None
+-    max_episodes_rendered = 0 if cfg.eval.recording else 10
+-    videos_dir = None if cfg.eval.recording else Path(cfg.output_dir) / "videos"
++    max_episodes_rendered = 0
++    videos_dir = None
+ 
+     with torch.no_grad(), torch.autocast(device_type=device.type) if cfg.policy.use_amp else nullcontext():
+         info = eval_policy_all(
+-- 
+2.52.0
